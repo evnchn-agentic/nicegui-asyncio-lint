@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nicegui-asyncio-lint"
+version = "0.1.0"
+description = "Static-analysis checks for common asyncio footguns (blocking sleep, blocking sync I/O in coroutines, unbounded create_task, missing await) — built for NiceGUI apps, useful for any asyncio codebase."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "evnchn" }]
+
+[project.scripts]
+nicegui-asyncio-lint = "nicegui_asyncio_lint.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["nicegui_asyncio_lint*"]
