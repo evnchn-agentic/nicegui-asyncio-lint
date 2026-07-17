@@ -12,7 +12,7 @@ connected client, not just the caller), but the checks are generic asyncio, not 
 | Code | Catches | Example |
 |---|---|---|
 | `NGA001` | `time.sleep(...)` inside `async def` | `async def f(): time.sleep(2)` |
-| `NGA002` | Known-blocking sync I/O inside `async def` — `requests.*`, `urllib.request.urlopen`, `subprocess.run/call/check_call/check_output`, `os.system`, builtin `open()`, builtin `input()` | `async def f(): requests.get(url)` |
+| `NGA002` | Known-blocking sync I/O inside `async def` — `requests.*`, `urllib.request.urlopen`, `subprocess.run/call/check_call/check_output`, `os.system`, builtin `input()` (builtin `open()` is **not** in the default set — too common to fail CI on) | `async def f(): requests.get(url)` |
 | `NGA003` | `asyncio.create_task()` / `asyncio.ensure_future()` whose return value is discarded (not assigned to anything) | `async def f(): asyncio.create_task(bg())` |
 | `NGA004` | A call to a function/method defined `async def` in the same file, used as a bare statement without `await` | `async def f(): some_local_coro()` |
 
@@ -92,12 +92,17 @@ for f in findings:
   258), only one of which (`line 39`) is `async def`. The checker flagged the unrelated sync
   `number_ui()` call at line 16 as `NGA004`. A real implementation shipped as a NiceGUI contrib
   module or PR should either scope symbol collection per-enclosing-function, or (more robustly)
-  drop `NGA004` to *warn* severity and require `--strict-await` to fail CI on it, given this
-  known false-positive class.
-- **`NGA004` is single-file only.** It cannot see across `import`s, so missing-await bugs on
-  imported coroutines are not caught. This trades recall for zero false positives on ordinary
-  sync calls to imported functions — the alternative (assuming every unresolved bare call might
-  be an unawaited coroutine) would be far too noisy to be usable.
+  keep `NGA004` low-noise, it only fires on names that are `async def` in *this* file **and**
+  never also defined as a plain `def` (ambiguous names are skipped), so an ordinary sync
+  `self.refresh()` is never flagged just because some other class has an async `refresh`.
+- **Import-aware, single file.** `NGA001`/`NGA002` resolve `import x as y`, `from m import n`,
+  and `from m import n as p` to the canonical name before matching (so `from time import sleep;
+  sleep(1)` and `import requests as r; r.get(...)` are caught), and a *parameter* that shadows a
+  module (`async def f(time): time.sleep(1)`) is correctly **not** flagged. Cross-file resolution
+  is still out of scope — a missing `await` on an *imported* coroutine is not caught.
+- **`NGA003`/`NGA004` catch the discarded-as-a-statement and `return`ed forms, but not
+  "assigned to a local that is then never used"** (`t = create_task(...)` with `t` never
+  referenced). That needs use/flow analysis; it's the natural next step, not done here.
 - **`NGA002`'s blocking-call list is a fixed, conservative allowlist-of-known-badness**, not a
   type checker. Arbitrary third-party blocking calls (a blocking driver's `.execute()`, a
   synchronous SDK method, etc.) are invisible to it by design — extending the list is the

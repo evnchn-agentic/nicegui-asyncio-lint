@@ -79,3 +79,81 @@ def test_lambda_inside_async_def_is_not_treated_as_async_context():
     source = "async def f():\n    g = lambda: open('x')\n"
     findings = check_source(source)
     assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the issues found in adversarial (Codex) review.
+# ---------------------------------------------------------------------------
+
+def test_nga004_no_false_positive_on_sync_method_sharing_async_name():
+    # Codex #1: a sync method must not be flagged just because another class has
+    # an async method of the same name. Ambiguous names are skipped.
+    source = (
+        "class A:\n    async def refresh(self): ...\n\n"
+        "class B:\n    def refresh(self): ...\n"
+        "    def f(self):\n        self.refresh()\n"
+    )
+    assert check_source(source) == []
+
+
+def test_nga001_from_import_sleep_resolved():
+    # Codex #2 (false negative): `from time import sleep; sleep(1)`
+    source = "from time import sleep\n\nasync def f():\n    sleep(1)\n"
+    assert _codes(check_source(source)) == ["NGA001"]
+
+
+def test_nga002_aliased_module_import_resolved():
+    # Codex #2 (false negative): `import requests as r; r.get(...)`
+    source = "import requests as r\n\nasync def f():\n    r.get('http://x')\n"
+    assert _codes(check_source(source)) == ["NGA002"]
+
+
+def test_nga002_from_import_name_resolved():
+    source = "from requests import get\n\nasync def f():\n    get('http://x')\n"
+    assert _codes(check_source(source)) == ["NGA002"]
+
+
+def test_param_shadowing_module_is_not_flagged():
+    # Codex #2 (false positive): a parameter named `time` shadows the module.
+    assert check_source("async def f(time):\n    time.sleep(1)\n") == []
+    assert check_source("async def f(requests):\n    requests.get('x')\n") == []
+
+
+def test_local_create_task_function_not_flagged_as_nga003():
+    # Codex #4: a local create_task() that isn't asyncio.create_task
+    source = "def create_task(x): ...\n\ndef f():\n    create_task(1)\n"
+    assert check_source(source) == []
+
+
+def test_nga004_returned_coroutine_flagged():
+    # Codex #6: `return helper()` where helper is async = forgotten await
+    source = "async def helper(): ...\n\nasync def f():\n    return helper()\n"
+    assert _codes(check_source(source)) == ["NGA004"]
+
+
+def test_open_not_in_default_blocking_set():
+    # Codex #3: builtin open() is too noisy to fail CI on by default
+    assert check_source("async def f():\n    open('cfg.json')\n") == []
+
+
+def test_decorator_expression_checked_in_enclosing_scope():
+    # Codex #7: a decorator runs at import time, not inside the coroutine
+    source = (
+        "import requests\n\ndef deco(x): return x\n\n"
+        "@deco(requests.get('http://x'))\n"
+        "async def f():\n    pass\n"
+    )
+    assert check_source(source) == []
+
+
+def test_columns_are_one_based():
+    # Codex #11: 1-based columns like other linters
+    findings = check_source("import time\n\nasync def f():\n    time.sleep(1)\n")
+    assert len(findings) == 1
+    assert findings[0].col == 5  # 4 spaces of indent -> column 5
+
+
+def test_pyi_stub_skipped_in_directory(tmp_path):
+    # Codex #10: .pyi stubs contain no runtime code
+    (tmp_path / "s.pyi").write_text("import time\nasync def f():\n    time.sleep(1)\n")
+    assert list(check_paths([tmp_path])) == []
