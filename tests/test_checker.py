@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from nicegui_asyncio_lint.checker import check_source, check_paths
+from nicegui_asyncio_lint.checker import DEFAULT_EXCLUDE_DIRS, check_source, check_paths
+from nicegui_asyncio_lint.cli import main
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -157,3 +158,100 @@ def test_pyi_stub_skipped_in_directory(tmp_path):
     # Codex #10: .pyi stubs contain no runtime code
     (tmp_path / "s.pyi").write_text("import time\nasync def f():\n    time.sleep(1)\n")
     assert list(check_paths([tmp_path])) == []
+
+
+# ---------------------------------------------------------------------------
+# Directory-walk exclusions: linting a project root must not lint its virtualenv.
+# ---------------------------------------------------------------------------
+
+BLOCKING = "import time\n\nasync def f():\n    time.sleep(1)\n"
+
+
+def _project(root: Path, *vendor_dirs: str) -> None:
+    """A clean app.py plus one blocking-call module inside each vendor dir."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "app.py").write_text("async def index():\n    pass\n")
+    for rel in vendor_dirs:
+        d = root / rel
+        d.mkdir(parents=True)
+        (d / "mod.py").write_text(BLOCKING)
+
+
+def test_venv_inside_a_project_root_is_not_linted(tmp_path):
+    # The bug: `nicegui-asyncio-lint .` on a brand-new project reported 15 findings,
+    # all of them from .venv/lib/.../site-packages — third-party code the user cannot
+    # fix — and exited 1, so the documented "CI-friendly exit code" was always red.
+    _project(tmp_path, ".venv/lib/python3.12/site-packages/anyio")
+    assert list(check_paths([tmp_path])) == []
+
+
+def test_each_default_excluded_dir_name_is_pruned(tmp_path):
+    for name in DEFAULT_EXCLUDE_DIRS:
+        root = tmp_path / name.replace("-", "_")
+        _project(root, name)
+        assert list(check_paths([root])) == [], name
+
+
+def test_dot_directories_are_pruned(tmp_path):
+    _project(tmp_path, ".tox/py312/lib/pkg", ".git/hooks", ".mypy_cache/3.12")
+    assert list(check_paths([tmp_path])) == []
+
+
+def test_an_explicitly_named_root_is_never_pruned(tmp_path):
+    # Pointing the tool AT a venv still scans it — exclusion prunes discovered
+    # directories, not the paths the user asked for.
+    _project(tmp_path, ".venv/pkg")
+    assert [f.code for f in check_paths([tmp_path / ".venv"])] == ["NGA001"]
+    # ...but a name in the exclude set still prunes below the root, so a whole
+    # venv needs its site-packages named directly (or exclude_dirs=()).
+    _project(tmp_path / "b", ".venv/lib/site-packages/pkg")
+    assert list(check_paths([tmp_path / "b" / ".venv"])) == []
+    assert [f.code for f in check_paths([tmp_path / "b/.venv/lib/site-packages"])] == ["NGA001"]
+
+
+def test_exclusions_can_be_turned_off(tmp_path):
+    _project(tmp_path, ".venv/pkg", "node_modules/x")
+    findings = list(check_paths([tmp_path], exclude_dirs=(), skip_dot_dirs=False))
+    assert [f.code for f in findings] == ["NGA001", "NGA001"]
+
+
+def test_extra_exclude_dir_names_are_honoured(tmp_path):
+    _project(tmp_path, "vendor")
+    assert [f.code for f in check_paths([tmp_path])] == ["NGA001"]
+    assert list(check_paths([tmp_path], exclude_dirs={"vendor"})) == []
+
+
+def test_cli_exits_zero_on_a_clean_project_with_a_venv(tmp_path, capsys):
+    _project(tmp_path, ".venv/lib/site-packages/pkg")
+    assert main([str(tmp_path)]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_cli_no_default_excludes_flag_scans_the_venv(tmp_path):
+    _project(tmp_path, ".venv/lib/site-packages/pkg")
+    assert main(["--no-default-excludes", str(tmp_path)]) == 1
+
+
+def test_cli_exclude_flag_adds_names(tmp_path):
+    _project(tmp_path, "vendor", "generated")
+    assert main([str(tmp_path)]) == 1
+    assert main(["--exclude", "vendor,generated", str(tmp_path)]) == 0
+    # a comma-SPACE list is what people actually type
+    assert main(["--exclude", "vendor, generated", str(tmp_path)]) == 0
+
+
+def test_an_explicitly_named_pyi_stub_is_still_skipped(tmp_path):
+    # Codex review of this change: the .pyi skip used to cover the explicit-file
+    # branch too, and moving the filter into the directory walk dropped it.
+    stub = tmp_path / "s.pyi"
+    stub.write_text(BLOCKING)
+    assert list(check_paths([stub])) == []
+
+
+def test_findings_are_globally_path_sorted(tmp_path):
+    # Codex review: os.walk is top-down, so root files come before subdirectories;
+    # the old sorted(rglob(...)) ordered every path together. Keep that.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "z.py").write_text(BLOCKING)
+    (tmp_path / "a" / "x.py").write_text(BLOCKING)
+    assert [Path(f.path).name for f in check_paths([tmp_path])] == ["x.py", "z.py"]

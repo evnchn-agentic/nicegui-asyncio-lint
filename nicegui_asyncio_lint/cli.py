@@ -9,7 +9,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .checker import check_paths
+from .checker import DEFAULT_EXCLUDE_DIRS, check_paths
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,11 +24,25 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="comma-separated rule codes to restrict to, e.g. NGA001,NGA003",
     )
+    parser.add_argument(
+        "--exclude",
+        default=None,
+        help="comma-separated extra directory NAMES to prune while walking, e.g. migrations,vendor",
+    )
+    parser.add_argument(
+        "--no-default-excludes",
+        action="store_true",
+        help=f"also scan dot-directories and {', '.join(sorted(DEFAULT_EXCLUDE_DIRS))} "
+        "(by default those are pruned, so a project's .venv is not linted)",
+    )
     args = parser.parse_args(argv)
 
     select = set(args.select.split(",")) if args.select else None
+    extra = {n.strip() for n in args.exclude.split(",") if n.strip()} if args.exclude else set()
+    exclude_dirs = extra if args.no_default_excludes else DEFAULT_EXCLUDE_DIRS | extra
 
-    findings = list(check_paths(args.paths))
+    findings = list(check_paths(
+        args.paths, exclude_dirs=exclude_dirs, skip_dot_dirs=not args.no_default_excludes))
     if select:
         findings = [f for f in findings if f.code in select]
 

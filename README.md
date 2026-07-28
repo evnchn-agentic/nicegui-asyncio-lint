@@ -41,6 +41,25 @@ nicegui-asyncio-lint --select NGA001,NGA003 path/to/project/
 
 Exit code is `1` if anything was flagged (CI-friendly), `0` otherwise.
 
+### What gets scanned
+
+Walking a directory prunes dot-directories (`.venv`, `.git`, `.tox`, `.mypy_cache`, …) and the
+names in `DEFAULT_EXCLUDE_DIRS` (`venv`, `node_modules`, `__pycache__`, `__pypackages__`,
+`site-packages`, `dist`, `_build`, `buck-out`) — the subset of ruff's default exclude list that
+can hold `.py` files. Without this, `nicegui-asyncio-lint .` on a fresh NiceGUI project reports
+findings from `anyio`/`engineio`/`nicegui` inside the project's own `.venv` — third-party code
+the user cannot fix — and exits `1`.
+
+Only *discovered* directories are pruned; a path named on the command line is always scanned, so
+`nicegui-asyncio-lint .venv/lib/python3.12/site-packages` still works. That is also the escape
+hatch for code you *do* own inside a dot-directory — `.github/scripts/` is skipped by the walk
+unless you name it.
+
+```bash
+nicegui-asyncio-lint --exclude vendor,migrations .   # prune extra directory names
+nicegui-asyncio-lint --no-default-excludes .         # scan everything, venv included
+```
+
 ### As a pre-commit hook
 
 ```yaml
@@ -66,8 +85,9 @@ for f in findings:
 
 ## Self-verification performed (this session)
 
-- `pytest tests/ -v` → **8/8 passed** (one test per rule's true-positive + true-negative
-  boundary, plus a directory-walk + syntax-error-tolerance test).
+- `pytest tests/ -v` → **all passed** (one test per rule's true-positive + true-negative
+  boundary, plus a directory-walk + syntax-error-tolerance test; 8 at the time of writing,
+  28 today).
 - Ran the built CLI against real code on this machine, read-only:
   - `~/nicegui/nicegui` (243 `.py` files, NiceGUI's own core library) → **0 findings** — plausible
     for a mature, reviewed core lib; the checks target app-level mistakes.

@@ -25,6 +25,10 @@ source .venv/bin/activate   # created via: uv venv .venv && uv pip install -e ".
 nicegui-asyncio-lint <path-to-file-or-project>
 ```
 
+Pointing it at a project root is safe: dot-directories and vendored trees (`.venv`, `venv`,
+`node_modules`, `site-packages`, …) are pruned, so you only see findings in code you own. Add
+names with `--exclude a,b`; scan everything with `--no-default-excludes`.
+
 Or import directly without the CLI:
 
 ```python
