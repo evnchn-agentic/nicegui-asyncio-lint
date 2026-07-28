@@ -6,7 +6,7 @@ locally-defined ``async def`` that are never awaited.
 See README.md for rationale, usage, and known limitations.
 """
 
-from .checker import Finding, RULES, check_source, check_paths
+from .checker import DEFAULT_EXCLUDE_DIRS, Finding, RULES, check_source, check_paths, iter_python_files
 
-__all__ = ["Finding", "RULES", "check_source", "check_paths"]
+__all__ = ["DEFAULT_EXCLUDE_DIRS", "Finding", "RULES", "check_source", "check_paths", "iter_python_files"]
 __version__ = "0.1.0"

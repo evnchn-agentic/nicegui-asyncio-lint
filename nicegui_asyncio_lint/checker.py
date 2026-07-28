@@ -43,9 +43,18 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import os
 import sys
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Collection, Iterable, Iterator
+
+#: Directory *names* skipped when walking a directory, on top of the
+#: skip-dot-directories rule (which covers .venv/.git/.tox/.mypy_cache/...).
+#: A path named explicitly on the command line is never excluded.
+#: The non-dot names are the subset of ruff's default exclude list that can hold .py files.
+DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset({
+    "venv", "node_modules", "__pycache__", "__pypackages__", "site-packages", "dist", "_build", "buck-out",
+})
 
 RULES: dict[str, str] = {
     "NGA001": "blocking time.sleep() inside an async def — use `await asyncio.sleep(...)` instead",
@@ -261,17 +270,54 @@ def check_source(source: str, path: str = "<string>") -> list[Finding]:
     return sorted(visitor.findings, key=lambda f: (f.line, f.col, f.code))
 
 
-def check_paths(paths: Iterable[Path]) -> Iterator[Finding]:
+def _report_walk_error(exc: OSError) -> None:
+    print(f"{exc.filename}: skipped (unreadable: {exc})", file=sys.stderr)
+
+
+def iter_python_files(
+    root: Path,
+    *,
+    exclude_dirs: Collection[str] = DEFAULT_EXCLUDE_DIRS,
+    skip_dot_dirs: bool = True,
+) -> Iterator[Path]:
+    """Yield every `.py` file under `root`, pruning excluded directories.
+
+    A directory is pruned (never descended into) when its name is in
+    `exclude_dirs`, or — with `skip_dot_dirs` — when it starts with a dot. Only
+    *discovered* directories are pruned: `root` itself is always scanned, so an
+    excluded path can still be linted by naming it explicitly (a whole venv needs
+    `exclude_dirs=()` too, since `site-packages` is excluded by name).
+    `.pyi` stubs never match (they contain no runtime code). Paths come out
+    globally sorted, and an unreadable directory is reported on stderr rather
+    than silently skipped."""
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_report_walk_error):
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in exclude_dirs and not (skip_dot_dirs and d.startswith("."))
+        ]
+        found.extend(Path(dirpath) / name for name in filenames if name.endswith(".py"))
+    yield from sorted(found)
+
+
+def check_paths(
+    paths: Iterable[Path],
+    *,
+    exclude_dirs: Collection[str] = DEFAULT_EXCLUDE_DIRS,
+    skip_dot_dirs: bool = True,
+) -> Iterator[Finding]:
     """Run checks over every .py file under the given paths (files or directories).
 
-    `.pyi` stubs are skipped (they contain no runtime code). Files that fail to
-    parse are reported on stderr (not silently swallowed) and skipped."""
+    Virtualenvs and vendored trees are pruned by default (see `iter_python_files`)
+    — without that, linting a project root reports findings from third-party code
+    the user cannot fix, and exits non-zero in CI. Files that fail to parse are
+    reported on stderr (not silently swallowed) and skipped."""
     for p in paths:
         p = Path(p)
         if p.is_file():
-            files = [p]
+            files: Iterable[Path] = [p]
         else:
-            files = sorted(f for f in p.rglob("*.py") if f.suffix == ".py")
+            files = iter_python_files(p, exclude_dirs=exclude_dirs, skip_dot_dirs=skip_dot_dirs)
         for f in files:
             if f.suffix == ".pyi":
                 continue
