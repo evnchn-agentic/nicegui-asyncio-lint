@@ -101,18 +101,19 @@ for f in findings:
 ## Precision on third-party code, and overlap with ruff (2026-10-19)
 
 Run over NiceGUI's dev `.venv` (`--no-default-excludes`: redis, jinja2, engineio, playwright, trio and others) plus NiceGUI's own
-source, the checker reported 35 findings. Hand-labelled, 15 were true positives and 20 were false
-positives from three gaps, all fixed since: a plain `def` returning a coroutine (redis lock
+source, the checker reported 35 findings. Hand-labelled, 14 were true positives and 21 were false
+positives. Three gaps, fixed since, account for 20 of them: a plain `def` returning a coroutine (redis lock
 `release()`, jinja2 `Macro.__call__`), a call to an async generator (NiceGUI
 `FileUpload.iterate()`, jinja2 `do_select`), and a returned Task (engineio
-`start_background_task`). The same corpus now gives the same 15 findings and no false positives.
+`start_background_task`). The same corpus now gives the 14 true positives and one false positive.
 
 ruff's `ASYNC251` and `RUF006` found the same `NGA001`/`NGA003` true positives on that corpus,
 except three `time.sleep` calls in trio's tests that carry `# noqa: ASYNC251`. If you already run
-ruff with those rules, `NGA004` is what this tool adds. It found a real bug in redis-py 7.1.1 that
-is still on redis-py main: `TransactionStrategy._execute_command` is an `async def` that does
-`return self._immediate_execute_command(...)`, so the sync `execute_command()` returns a coroutine
-object instead of a result.
+ruff with those rules, only `NGA004` adds anything, and on this corpus it found no confirmed bug.
+Its one remaining hit is redis-py's cluster `TransactionStrategy._execute_command`, an `async def`
+that returns `self._immediate_execute_command(...)` unawaited on purpose: while WATCHing, the
+caller does `await pipe.get(key)` (redis-py's own tests do this). An AST check cannot tell that
+apart from a forgotten `await`.
 
 ## Known limitations (found empirically, not just theorized)
 
