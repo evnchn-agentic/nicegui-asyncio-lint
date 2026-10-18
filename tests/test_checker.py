@@ -132,6 +132,40 @@ def test_nga004_returned_coroutine_flagged():
     assert _codes(check_source(source)) == ["NGA004"]
 
 
+def test_nga004_sync_def_returning_coroutine_not_flagged():
+    # pass-through wrapper (redis lock.release, jinja2 Macro.__call__): the caller awaits
+    source = "async def helper(): ...\n\ndef f():\n    return helper()\n"
+    assert check_source(source) == []
+
+
+def test_nga004_async_generator_call_not_flagged():
+    # calling an async generator returns an async iterator; awaiting it would be a TypeError
+    source = (
+        "async def gen():\n    yield 1\n\n"
+        "def f():\n    return gen()\n\n"
+        "async def g():\n    gen()\n    return gen()\n"
+    )
+    assert check_source(source) == []
+
+
+def test_nga004_yield_in_nested_def_does_not_make_outer_a_generator():
+    source = (
+        "async def helper():\n    def inner():\n        yield 1\n    return 1\n\n"
+        "async def f():\n    helper()\n"
+    )
+    assert _codes(check_source(source)) == ["NGA004"]
+
+
+def test_nga003_returned_task_not_flagged():
+    # returning the Task hands its strong reference to the caller
+    source = (
+        "import asyncio\n\nasync def helper(): ...\n\n"
+        "def f():\n    return asyncio.ensure_future(helper())\n\n"
+        "async def g():\n    return asyncio.create_task(helper())\n"
+    )
+    assert check_source(source) == []
+
+
 def test_open_not_in_default_blocking_set():
     # Codex #3: builtin open() is too noisy to fail CI on by default
     assert check_source("async def f():\n    open('cfg.json')\n") == []
