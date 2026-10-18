@@ -123,6 +123,11 @@ for f in findings:
 - **`NGA003`/`NGA004` catch the discarded-as-a-statement and `return`ed forms, but not
   "assigned to a local that is then never used"** (`t = create_task(...)` with `t` never
   referenced). That needs use/flow analysis; it's the natural next step, not done here.
+- **The `return`ed form only fires inside an `async def`, and async generators are never
+  flagged.** A sync `def` returning a coroutine is a factory whose caller awaits it (dlt's
+  `_limit_postprocessor`), and calling an async generator function without `await` is correct
+  (NiceGUI's `UploadFile.iterate`). The price: a sync callback whose return value is dropped
+  (`def on_done(f): return save()` passed to `add_done_callback`) is no longer caught.
 - **`NGA002`'s blocking-call list is a fixed, conservative allowlist-of-known-badness**, not a
   type checker. Arbitrary third-party blocking calls (a blocking driver's `.execute()`, a
   synchronous SDK method, etc.) are invisible to it by design — extending the list is the
@@ -142,9 +147,8 @@ Both are viable from this same code, unmodified:
    `nicegui/testing/asyncio_lint.py` or a new `scripts/asyncio_lint.py` in the NiceGUI repo,
    wire it into `docs`/`CONTRIBUTING.md` as an optional dev-mode check, and/or add a pytest
    marker that runs it over `examples/` in CI to keep NiceGUI's own example gallery footgun-free.
-   Given the `NGA004` false-positive found against NiceGUI's *own* test suite above, step 1 of
-   any such PR should be tightening `NGA004` scope-resolution first — shipping it against
-   NiceGUI's codebase as-is would immediately self-flag.
+   NiceGUI's `nicegui/`, `examples/`, `website/` and `tests/` currently lint clean (0 findings
+   at NiceGUI commit `8fb479bc6`), though the flat name resolution above can still misfire.
 3. A draft **Claude Code skill wrapper** (`SKILL.md` in this directory) is included as a third
    option so an agent session can reach for this tool by trigger phrase without a human first
    publishing it anywhere.

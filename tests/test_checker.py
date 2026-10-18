@@ -132,6 +132,18 @@ def test_nga004_returned_coroutine_flagged():
     assert _codes(check_source(source)) == ["NGA004"]
 
 
+def test_nga004_async_generator_is_not_a_coroutine():
+    # nicegui/elements/upload_files.py: calling an async generator function is correct without await
+    source = "def iterate():\n    async def gen():\n        yield 1\n    gen()\n    return gen()\n"
+    assert check_source(source) == []
+
+
+def test_nga004_sync_def_may_return_a_coroutine():
+    # dlt/extract/decorators.py: a sync factory hands the coroutine to a caller that awaits it
+    source = "async def helper(): ...\n\ndef f():\n    return helper()\n"
+    assert check_source(source) == []
+
+
 def test_open_not_in_default_blocking_set():
     # Codex #3: builtin open() is too noisy to fail CI on by default
     assert check_source("async def f():\n    open('cfg.json')\n") == []

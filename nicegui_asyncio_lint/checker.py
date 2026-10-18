@@ -245,19 +245,33 @@ class _AsyncFootgunVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Return(self, node: ast.Return) -> None:
-        if node.value is not None:
+        # a sync def returning a coroutine is a factory; its caller does the awaiting
+        if node.value is not None and self._in_async:
             self._check_discarded_call(node, node.value, "returned without await")
         self.generic_visit(node)
 
 
+def _yields(func: ast.AsyncFunctionDef) -> bool:
+    """True if `func` itself (not a nested scope) contains `yield`, i.e. it is an async generator."""
+    todo: list[ast.AST] = list(func.body)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            return True
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            todo.extend(ast.iter_child_nodes(node))
+    return False
+
+
 def _async_only_names(tree: ast.AST) -> set[str]:
-    """Names defined as `async def` somewhere and never also as a plain `def`."""
+    """Names defined as a coroutine `async def` somewhere and never also as a plain `def`
+    or an async generator (calling either without `await` is correct)."""
     async_names: set[str] = set()
     sync_names: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef):
+        if isinstance(node, ast.AsyncFunctionDef) and not _yields(node):
             async_names.add(node.name)
-        elif isinstance(node, ast.FunctionDef):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             sync_names.add(node.name)
     return async_names - sync_names
 
