@@ -139,6 +139,10 @@ object instead of a result.
 - **`NGA003` catches the discarded-as-a-statement form; `NGA004` also catches `return coro()`
   inside another `async def`.** Neither flags a plain `def` returning a coroutine or Task (the
   caller gets the awaitable) or a call to an async generator (it returns an async iterator).
+  The trade-off: a sync callback that returns a coroutine to a consumer which discards it
+  (`loop.call_soon(cb)`) is no longer caught. The async-generator exemption assumes decorators
+  keep the calling convention, and only looks for `yield` in the function's own body (not in a
+  nested def's default arguments or decorators, where Python also evaluates it in the outer scope).
   Neither catches "assigned to a local that is then never used"** (`t = create_task(...)` with `t` never
   referenced). That needs use/flow analysis; it's the natural next step, not done here.
 - **`NGA002`'s blocking-call list is a fixed, conservative allowlist-of-known-badness**, not a
