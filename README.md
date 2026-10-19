@@ -98,6 +98,23 @@ for f in findings:
     behaviour, not app code), and one genuine **false positive** surfaced and is written up
     below because it directly demonstrates the documented scoping limitation.
 
+## Precision on third-party code, and overlap with ruff (2026-10-19)
+
+Run over NiceGUI's dev `.venv` (`--no-default-excludes`: redis, jinja2, engineio, playwright, trio and others) plus NiceGUI's own
+source, the checker reported 35 findings. Hand-labelled, 14 were true positives and 21 were false
+positives. Three gaps, fixed since, account for 20 of them: a plain `def` returning a coroutine (redis lock
+`release()`, jinja2 `Macro.__call__`), a call to an async generator (NiceGUI
+`FileUpload.iterate()`, jinja2 `do_select`), and a returned Task (engineio
+`start_background_task`). The same corpus now gives the 14 true positives and one false positive.
+
+ruff's `ASYNC251` and `RUF006` found the same `NGA001`/`NGA003` true positives on that corpus,
+except three `time.sleep` calls in trio's tests that carry `# noqa: ASYNC251`. If you already run
+ruff with those rules, only `NGA004` adds anything, and on this corpus it found no confirmed bug.
+Its one remaining hit is redis-py's cluster `TransactionStrategy._execute_command`, an `async def`
+that returns `self._immediate_execute_command(...)` unawaited on purpose: while WATCHing, the
+caller does `await pipe.get(key)` (redis-py's own tests do this). An AST check cannot tell that
+apart from a forgotten `await`.
+
 ## Known limitations (found empirically, not just theorized)
 
 - **Single-file, flat, unscoped name resolution for `NGA004`.** The checker does not do real
@@ -120,8 +137,14 @@ for f in findings:
   sleep(1)` and `import requests as r; r.get(...)` are caught), and a *parameter* that shadows a
   module (`async def f(time): time.sleep(1)`) is correctly **not** flagged. Cross-file resolution
   is still out of scope — a missing `await` on an *imported* coroutine is not caught.
-- **`NGA003`/`NGA004` catch the discarded-as-a-statement and `return`ed forms, but not
-  "assigned to a local that is then never used"** (`t = create_task(...)` with `t` never
+- **`NGA003` catches the discarded-as-a-statement form; `NGA004` also catches `return coro()`
+  inside another `async def`.** Neither flags a plain `def` returning a coroutine or Task (the
+  caller gets the awaitable) or a call to an async generator (it returns an async iterator).
+  The trade-off: a sync callback that returns a coroutine to a consumer which discards it
+  (`loop.call_soon(cb)`) is no longer caught. The async-generator exemption assumes decorators
+  keep the calling convention, and only looks for `yield` in the function's own body (not in a
+  nested def's default arguments or decorators, where Python also evaluates it in the outer scope).
+  Neither catches "assigned to a local that is then never used"** (`t = create_task(...)` with `t` never
   referenced). That needs use/flow analysis; it's the natural next step, not done here.
 - **`NGA002`'s blocking-call list is a fixed, conservative allowlist-of-known-badness**, not a
   type checker. Arbitrary third-party blocking calls (a blocking driver's `.execute()`, a

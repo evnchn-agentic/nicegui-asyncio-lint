@@ -13,9 +13,11 @@ Four rules, chosen to match the four footguns named in the loose-end item:
           (the asyncio docs: "Save a reference to the result of this function,
           to avoid a task disappearing mid-execution").
   NGA004  A call to a function/method defined *async* in this same file, used
-          without `await` as a bare expression statement OR as a bare `return`
-          value — the coroutine object is created and then discarded/returned
-          instead of run.
+          without `await` as a bare expression statement OR as the `return`
+          value of another `async def` — the coroutine object is created and then
+          discarded/returned instead of run. Async generators are exempt (calling
+          one returns an async iterator, which is never awaited), and so is
+          `return coro()` from a plain `def`, which hands the awaitable to its caller.
 
 Design notes (what makes it low-false-positive):
   * Import-aware, single file. A small pre-pass reads `import`/`from ... import`
@@ -34,7 +36,9 @@ Design notes (what makes it low-false-positive):
     want it. `input()` stays (it hard-blocks the loop on stdin and is rare).
 
 Known limitations (documented, not hidden):
-  * NGA003/NGA004 catch the discarded-as-a-statement and returned forms, but not
+  * NGA003 catches the discarded-as-a-statement form only: a *returned* Task hands
+    its reference to the caller.
+  * NGA003/NGA004 do not catch
     "assigned to a local that is then never used" (that needs use/flow analysis).
   * Decorator expressions are evaluated at import time, so they are checked in the
     *enclosing* scope, not as if inside the coroutine body.
@@ -225,7 +229,8 @@ class _AsyncFootgunVisitor(ast.NodeVisitor):
         raw = _dotted_name(func)
         canon = self.imports.resolve(raw)
         if canon in _TASK_SCHEDULERS and not self._is_local(raw):
-            self._add(node, "NGA003", f"{RULES['NGA003']} ({canon}(...) {form})")
+            if not isinstance(node, ast.Return):  # a returned Task is referenced by the caller
+                self._add(node, "NGA003", f"{RULES['NGA003']} ({canon}(...) {form})")
             return
         # NGA004: a bare local-async name (skip if a param shadows it), or
         # self.method where the method name is async-only (self is expected to be
@@ -245,19 +250,34 @@ class _AsyncFootgunVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Return(self, node: ast.Return) -> None:
-        if node.value is not None:
+        # only an `async def` returning a coroutine is a forgotten await; a plain
+        # `def` returning one hands the awaitable to its caller
+        if node.value is not None and self._in_async:
             self._check_discarded_call(node, node.value, "returned without await")
         self.generic_visit(node)
 
 
+def _is_async_generator(node: ast.AsyncFunctionDef) -> bool:
+    """True if the function's own body (not a nested scope) yields."""
+    todo = list(node.body)
+    while todo:
+        child = todo.pop()
+        if isinstance(child, (ast.Yield, ast.YieldFrom)):
+            return True
+        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            todo.extend(ast.iter_child_nodes(child))
+    return False
+
+
 def _async_only_names(tree: ast.AST) -> set[str]:
-    """Names defined as `async def` somewhere and never also as a plain `def`."""
+    """Names defined as a coroutine `async def` somewhere and never also as a plain
+    `def` or an async generator."""
     async_names: set[str] = set()
     sync_names: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef):
+        if isinstance(node, ast.AsyncFunctionDef) and not _is_async_generator(node):
             async_names.add(node.name)
-        elif isinstance(node, ast.FunctionDef):
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             sync_names.add(node.name)
     return async_names - sync_names
 
