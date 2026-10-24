@@ -14,7 +14,7 @@ connected client, not just the caller), but the checks are generic asyncio, not 
 | `NGA001` | `time.sleep(...)` inside `async def` | `async def f(): time.sleep(2)` |
 | `NGA002` | Known-blocking sync I/O inside `async def` — `requests.*`, `urllib.request.urlopen`, `subprocess.run/call/check_call/check_output`, `os.system`, builtin `input()` (builtin `open()` is **not** in the default set — too common to fail CI on) | `async def f(): requests.get(url)` |
 | `NGA003` | `asyncio.create_task()` / `asyncio.ensure_future()` whose return value is discarded (not assigned to anything) | `async def f(): asyncio.create_task(bg())` |
-| `NGA004` | A call to a function/method defined `async def` in the same file, used as a bare statement without `await` | `async def f(): some_local_coro()` |
+| `NGA004` | A call to a function/method defined `async def` in the same file, or to a known library coroutine (`asyncio.sleep`/`wait_for`/`wait`/`to_thread`/`open_connection`/`start_server`/`create_subprocess_*`, NiceGUI `run.io_bound`/`cpu_bound`), used as a bare statement without `await` | `async def f(): asyncio.sleep(1)` |
 
 `NGA003` and `NGA004` are two faces of the same asyncio trap class the CPython docs warn about
 explicitly: a coroutine or Task object that's created and then has no strong reference held to
