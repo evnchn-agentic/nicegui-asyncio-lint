@@ -144,6 +144,10 @@ class _Imports:
                 for a in node.names:
                     local = a.asname or a.name
                     self.name_alias[local] = f"{mod}.{a.name}" if mod else a.name
+        # a def/class of the same name makes the binding ambiguous — don't resolve it
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                self.name_alias.pop(node.name, None)
 
     def resolve(self, dotted: str | None) -> str | None:
         if dotted is None:

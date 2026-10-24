@@ -319,3 +319,9 @@ def test_nga004_awaited_or_scheduled_library_coroutines_not_flagged():
         "    asyncio.sleep(1)\n"
     )
     assert check_source(source) == []
+
+
+def test_imported_name_redefined_in_file_is_not_resolved():
+    # Codex review: `def sleep` rebinds the imported name, so `sleep(0)` is not asyncio.sleep
+    assert check_source("from asyncio import sleep\n\ndef sleep(d): ...\n\nsleep(0)\n") == []
+    assert check_source("from time import sleep\n\nasync def sleep(d): ...\n\nasync def f():\n    await sleep(0)\n") == []
