@@ -325,3 +325,8 @@ def test_imported_name_redefined_in_file_is_not_resolved():
     # Codex review: `def sleep` rebinds the imported name, so `sleep(0)` is not asyncio.sleep
     assert check_source("from asyncio import sleep\n\ndef sleep(d): ...\n\nsleep(0)\n") == []
     assert check_source("from time import sleep\n\nasync def sleep(d): ...\n\nasync def f():\n    await sleep(0)\n") == []
+
+
+def test_method_name_does_not_shadow_a_module_import():
+    source = "from nicegui import run\n\nclass X:\n    def run(self): ...\n\nasync def f():\n    run.io_bound(print)\n"
+    assert _codes(check_source(source)) == ["NGA004"]
