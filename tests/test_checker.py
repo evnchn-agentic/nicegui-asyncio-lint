@@ -346,3 +346,33 @@ def test_on_kwargs_of_other_libraries_not_treated_as_handlers():
 def test_partial_handler_flagged():
     source = _NG + "from functools import partial\n\ndef h(x):\n    time.sleep(1)\n\nui.button(on_click=partial(h, 1))\n"
     assert [(f.line, f.code) for f in check_source(source)] == [(8, "NGA001")]
+
+
+def test_nga004_known_library_coroutines_without_await_flagged():
+    # the most common forgotten await is on a library coroutine, not a local one
+    source = (
+        "import asyncio\nfrom asyncio import sleep\nfrom nicegui import run\n\n"
+        "async def f():\n"
+        "    asyncio.sleep(1)\n"
+        "    sleep(1)\n"
+        "    run.io_bound(print)\n"
+        "    return asyncio.wait_for(f(), 1)\n"
+    )
+    findings = check_source(source)
+    assert _codes(findings) == ["NGA004"] * 4
+    assert "`asyncio.sleep(...)`" in findings[0].message
+
+
+def test_nga004_awaited_or_scheduled_library_coroutines_not_flagged():
+    source = (
+        "import asyncio\nfrom nicegui import run\n\n"
+        "async def f():\n"
+        "    await asyncio.sleep(1)\n"
+        "    await asyncio.wait_for(asyncio.sleep(1), 2)\n"
+        "    t = asyncio.create_task(run.io_bound(print))\n"
+        "    asyncio.gather(t)\n"
+        "\n"
+        "async def g(asyncio):\n"
+        "    asyncio.sleep(1)\n"
+    )
+    assert check_source(source) == []
