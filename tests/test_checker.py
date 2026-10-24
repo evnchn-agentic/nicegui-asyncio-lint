@@ -289,3 +289,33 @@ def test_findings_are_globally_path_sorted(tmp_path):
     (tmp_path / "z.py").write_text(BLOCKING)
     (tmp_path / "a" / "x.py").write_text(BLOCKING)
     assert [Path(f.path).name for f in check_paths([tmp_path])] == ["x.py", "z.py"]
+
+
+def test_nga004_known_library_coroutines_without_await_flagged():
+    # the most common forgotten await is on a library coroutine, not a local one
+    source = (
+        "import asyncio\nfrom asyncio import sleep\nfrom nicegui import run\n\n"
+        "async def f():\n"
+        "    asyncio.sleep(1)\n"
+        "    sleep(1)\n"
+        "    run.io_bound(print)\n"
+        "    return asyncio.wait_for(f(), 1)\n"
+    )
+    findings = check_source(source)
+    assert _codes(findings) == ["NGA004"] * 4
+    assert "`asyncio.sleep(...)`" in findings[0].message
+
+
+def test_nga004_awaited_or_scheduled_library_coroutines_not_flagged():
+    source = (
+        "import asyncio\nfrom nicegui import run\n\n"
+        "async def f():\n"
+        "    await asyncio.sleep(1)\n"
+        "    await asyncio.wait_for(asyncio.sleep(1), 2)\n"
+        "    t = asyncio.create_task(run.io_bound(print))\n"
+        "    asyncio.gather(t)\n"
+        "\n"
+        "async def g(asyncio):\n"
+        "    asyncio.sleep(1)\n"
+    )
+    assert check_source(source) == []

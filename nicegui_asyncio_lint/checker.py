@@ -12,7 +12,8 @@ Four rules, chosen to match the four footguns named in the loose-end item:
           discarded immediately, so asyncio may garbage-collect it mid-flight
           (the asyncio docs: "Save a reference to the result of this function,
           to avoid a task disappearing mid-execution").
-  NGA004  A call to a function/method defined *async* in this same file, used
+  NGA004  A call to a function/method defined *async* in this same file, or to a
+          known library coroutine (asyncio.sleep, NiceGUI run.io_bound, ...), used
           without `await` as a bare expression statement OR as the `return`
           value of another `async def` — the coroutine object is created and then
           discarded/returned instead of run. Async generators are exempt (calling
@@ -64,7 +65,7 @@ RULES: dict[str, str] = {
     "NGA001": "blocking time.sleep() inside an async def — use `await asyncio.sleep(...)` instead",
     "NGA002": "blocking sync I/O call inside an async def — stalls the event loop for every client",
     "NGA003": "asyncio.create_task()/ensure_future() result discarded — task may be GC'd mid-flight; keep a reference",
-    "NGA004": "call to a local async function/method without `await` — the coroutine is created and never runs",
+    "NGA004": "call to an async function without `await` — the coroutine is created and never runs",
 }
 
 # canonical dotted-name -> human hint appended to the NGA002 message.
@@ -88,6 +89,13 @@ _BLOCKING_CALLS: dict[str, str] = {
 
 _SLEEP = "time.sleep"
 _TASK_SCHEDULERS = {"asyncio.create_task", "asyncio.ensure_future"}
+# library coroutine functions: calling one without `await` runs nothing (NGA004)
+_LIBRARY_COROUTINES = {
+    "asyncio.sleep", "asyncio.wait_for", "asyncio.wait", "asyncio.to_thread",
+    "asyncio.open_connection", "asyncio.start_server",
+    "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell",
+    "nicegui.run.io_bound", "nicegui.run.cpu_bound",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -231,6 +239,9 @@ class _AsyncFootgunVisitor(ast.NodeVisitor):
         if canon in _TASK_SCHEDULERS and not self._is_local(raw):
             if not isinstance(node, ast.Return):  # a returned Task is referenced by the caller
                 self._add(node, "NGA003", f"{RULES['NGA003']} ({canon}(...) {form})")
+            return
+        if canon in _LIBRARY_COROUTINES and not self._is_local(raw):
+            self._add(node, "NGA004", f"{RULES['NGA004']} (`{canon}(...)` {form}, never awaited)")
             return
         # NGA004: a bare local-async name (skip if a param shadows it), or
         # self.method where the method name is async-only (self is expected to be
