@@ -289,3 +289,50 @@ def test_findings_are_globally_path_sorted(tmp_path):
     (tmp_path / "z.py").write_text(BLOCKING)
     (tmp_path / "a" / "x.py").write_text(BLOCKING)
     assert [Path(f.path).name for f in check_paths([tmp_path])] == ["x.py", "z.py"]
+
+
+_NG = "import time\nimport requests\nfrom nicegui import run, ui\n\n"
+
+
+def test_blocking_call_in_sync_page_or_handler_flagged():
+    source = _NG + (
+        "def fetch():\n    requests.get('https://x')\n\n"
+        "class Panel:\n    def save(self):\n        time.sleep(1)\n"
+        "    def build(self):\n        ui.button('save', on_click=self.save)\n\n"
+        "@ui.page('/')\ndef index():\n    time.sleep(1)\n"
+        "    ui.button('go', on_click=fetch)\n"
+        "    ui.input(on_change=lambda e: time.sleep(1))\n"
+    )
+    found = [(f.line, f.code) for f in check_source(source)]
+    assert found == [(6, "NGA002"), (10, "NGA001"), (16, "NGA001"), (18, "NGA001")], found
+    assert all("event loop" in f.message for f in check_source(source))
+
+
+def test_sync_handlers_offloaded_or_unreferenced_not_flagged():
+    source = _NG + (
+        "def heavy():\n    time.sleep(1)\n\n"
+        "def never_a_handler():\n    requests.get('https://x')\n\n"
+        "@ui.page('/')\nasync def index():\n"
+        "    ui.button('a', on_click=lambda: run.io_bound(heavy))\n"
+        "    ui.button('b', on_click=lambda: run.cpu_bound(heavy))\n"
+        "    await run.io_bound(heavy)\n"
+        "    def nested():\n        time.sleep(1)\n"
+    )
+    assert check_source(source) == [], [f.format() for f in check_source(source)]
+
+
+def test_on_kwargs_outside_nicegui_files_not_treated_as_handlers():
+    source = "import time\n\ndef cb():\n    time.sleep(1)\n\nthread_lib.start(on_done=cb)\n"
+    assert check_source(source) == []
+
+
+def test_blocking_call_reached_from_timer_or_through_a_call_flagged():
+    source = _NG + (
+        "def notify():\n    requests.post('https://x')\n\n"
+        "def tick():\n    notify()\n\n"
+        "ui.timer(1.0, tick)\n"
+        "ui.timer(1.0, callback=lambda: time.sleep(1))\n"
+        "ui.button('x', on_click=lambda: notify())\n"
+    )
+    found = [(f.line, f.code) for f in check_source(source)]
+    assert found == [(6, "NGA002"), (12, "NGA001")], found

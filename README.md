@@ -16,6 +16,16 @@ connected client, not just the caller), but the checks are generic asyncio, not 
 | `NGA003` | `asyncio.create_task()` / `asyncio.ensure_future()` whose return value is discarded (not assigned to anything) | `async def f(): asyncio.create_task(bg())` |
 | `NGA004` | A call to a function/method defined `async def` in the same file, used as a bare statement without `await` | `async def f(): some_local_coro()` |
 
+`NGA001` and `NGA002` also fire in the **sync** functions NiceGUI runs on the event loop: a sync
+`@ui.page` function, a callable passed as an `on_*=` handler or as a `ui.timer`/`app.timer`
+callback, and any same-file sync function those call directly. NiceGUI calls all of these inline
+on the loop (`page.py` wraps the page function in an `async def`; `events.handle_event` calls the
+handler), so `ui.button(on_click=save)` with a `time.sleep` in `save` freezes every client just
+like the `async def` case. Measured on NiceGUI 3.18: a 1.5 s `time.sleep` in a sync page or a
+sync `on_click` handler stalled a 50 ms heartbeat coroutine for 1.69 s. ruff's `ASYNC2xx` rules
+only look inside `async def`, so they miss this. This check is on only in files that import
+`nicegui`; `run.io_bound(save)` is not flagged, because it passes `save` rather than calling it.
+
 `NGA003` and `NGA004` are two faces of the same asyncio trap class the CPython docs warn about
 explicitly: a coroutine or Task object that's created and then has no strong reference held to
 it. For `NGA004` the coroutine object is simply never scheduled at all (silently does nothing —

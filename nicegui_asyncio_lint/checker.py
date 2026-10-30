@@ -7,6 +7,9 @@ Four rules, chosen to match the four footguns named in the loose-end item:
   NGA002  A known-blocking sync I/O call (requests.*, urllib.request.urlopen,
           subprocess.run/call/check_call/check_output, os.system, builtin input())
           made inside an `async def`.
+  NGA001/NGA002 also fire in sync functions NiceGUI runs on the event loop: `@ui.page`
+          functions, `on_*=` handlers, `ui.timer`/`app.timer` callbacks, and same-file sync
+          functions those call directly (files importing nicegui only).
   NGA003  `asyncio.create_task(...)` / `asyncio.ensure_future(...)` used as a bare
           expression statement — the returned Task's only strong reference is
           discarded immediately, so asyncio may garbage-collect it mid-flight
@@ -87,6 +90,9 @@ _BLOCKING_CALLS: dict[str, str] = {
 }
 
 _SLEEP = "time.sleep"
+_PAGE_DECORATORS = {"nicegui.ui.page", "ui.page"}
+_TIMERS = {"nicegui.ui.timer", "ui.timer", "nicegui.app.timer", "app.timer"}
+_HANDLER_CONTEXT = "in a sync NiceGUI page or event handler, which runs on the event loop"
 _TASK_SCHEDULERS = {"asyncio.create_task", "asyncio.ensure_future"}
 
 
@@ -152,12 +158,13 @@ class _Imports:
 
 
 class _AsyncFootgunVisitor(ast.NodeVisitor):
-    def __init__(self, path: str, imports: _Imports, async_only: set[str]) -> None:
+    def __init__(self, path: str, imports: _Imports, async_only: set[str], on_loop: set[int]) -> None:
         self.path = path
         self.imports = imports
         self.async_only = async_only  # names that are async def AND never plain def
+        self.on_loop = on_loop  # ids of sync defs/lambdas NiceGUI calls on the event loop
         self.findings: list[Finding] = []
-        self._async_stack: list[bool] = []
+        self._async_stack: list[str] = []  # "async", "handler" or "" per enclosing function
         self._locals_stack: list[set[str]] = []  # bound names (params) shadowing modules
 
     # -- scope handling --------------------------------------------------------
@@ -170,10 +177,11 @@ class _AsyncFootgunVisitor(ast.NodeVisitor):
         return names
 
     def _enter(self, node, is_async: bool) -> None:
+        ctx = "async" if is_async else "handler" if id(node) in self.on_loop else ""
         # decorators run at import time in the ENCLOSING scope — visit them first
         for dec in getattr(node, "decorator_list", []):
             self.visit(dec)
-        self._async_stack.append(is_async)
+        self._async_stack.append(ctx)
         self._locals_stack.append(self._params(node.args))
         for stmt in node.body:
             self.visit(stmt)
@@ -188,7 +196,7 @@ class _AsyncFootgunVisitor(ast.NodeVisitor):
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         # a lambda never yields; its body is not an async context
-        self._async_stack.append(False)
+        self._async_stack.append("handler" if id(node) in self.on_loop else "")
         self._locals_stack.append(self._params(node.args))
         self.visit(node.body)
         self._async_stack.pop()
@@ -196,7 +204,11 @@ class _AsyncFootgunVisitor(ast.NodeVisitor):
 
     @property
     def _in_async(self) -> bool:
-        return bool(self._async_stack) and self._async_stack[-1]
+        return bool(self._async_stack) and self._async_stack[-1] == "async"
+
+    @property
+    def _in_handler(self) -> bool:
+        return bool(self._async_stack) and self._async_stack[-1] == "handler"
 
     def _is_local(self, dotted: str | None) -> bool:
         if not dotted:
@@ -211,14 +223,16 @@ class _AsyncFootgunVisitor(ast.NodeVisitor):
 
     # -- NGA001 / NGA002: blocking calls anywhere inside an async def ----------
     def visit_Call(self, node: ast.Call) -> None:
-        if self._in_async:
+        if self._in_async or self._in_handler:
             raw = _dotted_name(node.func)
             if not self._is_local(raw):
                 canon = self.imports.resolve(raw)
                 if canon == _SLEEP:
-                    self._add(node, "NGA001", RULES["NGA001"])
+                    self._add(node, "NGA001", f"blocking time.sleep() {_HANDLER_CONTEXT} — make it `async def` "
+                              "and `await asyncio.sleep(...)`" if self._in_handler else RULES["NGA001"])
                 elif canon in _BLOCKING_CALLS:
-                    self._add(node, "NGA002", f"{RULES['NGA002']} ({canon}) — {_BLOCKING_CALLS[canon]}")
+                    where = f" {_HANDLER_CONTEXT}" if self._in_handler else ""
+                    self._add(node, "NGA002", f"{RULES['NGA002']} ({canon}){where} — {_BLOCKING_CALLS[canon]}")
         self.generic_visit(node)
 
     # -- NGA003 / NGA004 --------------------------------------------------------
@@ -282,10 +296,58 @@ def _async_only_names(tree: ast.AST) -> set[str]:
     return async_names - sync_names
 
 
+def _on_loop_sync_callables(tree: ast.AST, imports: _Imports) -> set[int]:
+    """ids of the sync defs and lambdas NiceGUI runs on the event loop: `@ui.page` functions,
+    callables passed as `on_*=` handlers or `ui.timer`/`app.timer` callbacks, and the same-file
+    sync functions those call directly. Only in files importing nicegui; a function named by
+    `name` or `self.name` counts only when the file defines exactly one function of that name."""
+    if not any(m.split(".")[0] == "nicegui" for m in (*imports.module_alias.values(), *imports.name_alias.values())):
+        return set()
+    defs: dict[str, list[ast.AST]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defs.setdefault(node.name, []).append(node)
+
+    def target(v: ast.AST) -> ast.AST | None:
+        if isinstance(v, ast.Lambda):
+            return v
+        name = v.id if isinstance(v, ast.Name) else (
+            v.attr if isinstance(v, ast.Attribute) and isinstance(v.value, ast.Name) and v.value.id == "self" else None)
+        if name and len(defs.get(name, ())) == 1 and isinstance(defs[name][0], ast.FunctionDef):
+            return defs[name][0]
+        return None
+
+    todo: list[ast.AST | None] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            for dec in node.decorator_list:
+                if imports.resolve(_dotted_name(dec.func if isinstance(dec, ast.Call) else dec)) in _PAGE_DECORATORS:
+                    todo.append(node)
+        elif isinstance(node, ast.Call):
+            todo += [target(kw.value) for kw in node.keywords if (kw.arg or "").startswith("on_")]
+            if imports.resolve(_dotted_name(node.func)) in _TIMERS:
+                todo += [target(v) for v in node.args[1:2]] + [target(kw.value) for kw in node.keywords if kw.arg == "callback"]
+    found: set[int] = set()
+    while todo:
+        fn = todo.pop()
+        if fn is None or id(fn) in found:
+            continue
+        found.add(id(fn))
+        body = list(fn.body) if isinstance(fn.body, list) else [fn.body]
+        while body:  # direct calls only: nested defs and lambdas are not run by calling fn
+            child = body.pop()
+            if isinstance(child, ast.Call):
+                todo.append(target(child.func) if not isinstance(child.func, ast.Lambda) else None)
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                body.extend(ast.iter_child_nodes(child))
+    return found
+
+
 def check_source(source: str, path: str = "<string>") -> list[Finding]:
     """Run all checks over a single module's source text; returns sorted Findings."""
     tree = ast.parse(source, filename=path)
-    visitor = _AsyncFootgunVisitor(path, _Imports(tree), _async_only_names(tree))
+    imports = _Imports(tree)
+    visitor = _AsyncFootgunVisitor(path, imports, _async_only_names(tree), _on_loop_sync_callables(tree, imports))
     visitor.visit(tree)
     return sorted(visitor.findings, key=lambda f: (f.line, f.col, f.code))
 
