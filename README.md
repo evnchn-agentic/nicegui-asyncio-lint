@@ -25,6 +25,10 @@ like the `async def` case. Measured on NiceGUI 3.18: a 1.5 s `time.sleep` in a s
 sync `on_click` handler stalled a 50 ms heartbeat coroutine for 1.69 s. ruff's `ASYNC2xx` rules
 only look inside `async def`, so they miss this. This check is on only in files that import
 `nicegui`; `run.io_bound(save)` is not flagged, because it passes `save` rather than calling it.
+`functools.partial(save, ...)` counts as `save`. An `on_*=` keyword on a call into another imported
+library (`mqtt.Client(on_connect=cb)`) is not treated as a NiceGUI handler, since such callbacks
+may run on that library's own thread. Not covered yet: `element.on('click', handler)`,
+`app.on_startup`/`app.on_connect` handlers, and sync functions called from an `async def`.
 
 `NGA003` and `NGA004` are two faces of the same asyncio trap class the CPython docs warn about
 explicitly: a coroutine or Task object that's created and then has no strong reference held to

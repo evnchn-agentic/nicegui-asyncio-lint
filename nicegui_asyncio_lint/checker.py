@@ -309,6 +309,8 @@ def _on_loop_sync_callables(tree: ast.AST, imports: _Imports) -> set[int]:
             defs.setdefault(node.name, []).append(node)
 
     def target(v: ast.AST) -> ast.AST | None:
+        if isinstance(v, ast.Call) and imports.resolve(_dotted_name(v.func)) == "functools.partial" and v.args:
+            v = v.args[0]
         if isinstance(v, ast.Lambda):
             return v
         name = v.id if isinstance(v, ast.Name) else (
@@ -317,6 +319,8 @@ def _on_loop_sync_callables(tree: ast.AST, imports: _Imports) -> set[int]:
             return defs[name][0]
         return None
 
+    # roots of other imported libraries: their on_*= callbacks may run in their own threads (paho-mqtt)
+    foreign = {m.split(".")[0] for m in (*imports.module_alias.values(), *imports.name_alias.values())} - {"nicegui"}
     todo: list[ast.AST | None] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef):
@@ -324,8 +328,10 @@ def _on_loop_sync_callables(tree: ast.AST, imports: _Imports) -> set[int]:
                 if imports.resolve(_dotted_name(dec.func if isinstance(dec, ast.Call) else dec)) in _PAGE_DECORATORS:
                     todo.append(node)
         elif isinstance(node, ast.Call):
-            todo += [target(kw.value) for kw in node.keywords if (kw.arg or "").startswith("on_")]
-            if imports.resolve(_dotted_name(node.func)) in _TIMERS:
+            canon = imports.resolve(_dotted_name(node.func)) or ""
+            if canon.split(".")[0] not in foreign:
+                todo += [target(kw.value) for kw in node.keywords if (kw.arg or "").startswith("on_")]
+            if canon in _TIMERS:
                 todo += [target(v) for v in node.args[1:2]] + [target(kw.value) for kw in node.keywords if kw.arg == "callback"]
     found: set[int] = set()
     while todo:

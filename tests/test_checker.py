@@ -336,3 +336,13 @@ def test_blocking_call_reached_from_timer_or_through_a_call_flagged():
     )
     found = [(f.line, f.code) for f in check_source(source)]
     assert found == [(6, "NGA002"), (12, "NGA001")], found
+
+
+def test_on_kwargs_of_other_libraries_not_treated_as_handlers():
+    source = _NG + "import paho.mqtt.client as mqtt\n\ndef cb(*a):\n    time.sleep(1)\n\nmqtt.Client(on_connect=cb)\n"
+    assert check_source(source) == [], [f.format() for f in check_source(source)]
+
+
+def test_partial_handler_flagged():
+    source = _NG + "from functools import partial\n\ndef h(x):\n    time.sleep(1)\n\nui.button(on_click=partial(h, 1))\n"
+    assert [(f.line, f.code) for f in check_source(source)] == [(8, "NGA001")]
