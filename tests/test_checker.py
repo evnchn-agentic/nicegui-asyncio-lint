@@ -346,3 +346,50 @@ def test_on_kwargs_of_other_libraries_not_treated_as_handlers():
 def test_partial_handler_flagged():
     source = _NG + "from functools import partial\n\ndef h(x):\n    time.sleep(1)\n\nui.button(on_click=partial(h, 1))\n"
     assert [(f.line, f.code) for f in check_source(source)] == [(8, "NGA001")]
+
+
+def test_blocking_call_in_sync_helper_called_from_async_def_flagged():
+    # no nicegui import: this is plain asyncio, the helper runs on the loop when the coroutine calls it
+    source = (
+        "import time, subprocess\n\n"
+        "def save():\n    time.sleep(1)\n\n"
+        "def build():\n    _run()\n\n"
+        "def _run():\n    subprocess.run(['make'])\n\n"
+        "class Job:\n    def flush(self):\n        time.sleep(1)\n\n"
+        "    async def tick(self):\n        self.flush()\n\n"
+        "async def handler():\n    save()\n    x = [build() for _ in range(1)]\n"
+    )
+    findings = check_source(source)
+    assert [(f.line, f.code) for f in findings] == [(4, "NGA001"), (10, "NGA002"), (14, "NGA001")], findings
+    assert "called from an async def" in findings[0].message
+
+
+def test_sync_helper_offloaded_or_not_called_from_async_def_not_flagged():
+    source = (
+        "import asyncio, time\nfrom nicegui import run\n\n"
+        "def save():\n    time.sleep(1)\n\n"
+        "def twice():\n    time.sleep(1)\n\ndef twice():\n    time.sleep(2)\n\n"
+        "def main():\n    save()\n\n"
+        "async def handler():\n"
+        "    await asyncio.to_thread(save)\n"
+        "    await run.io_bound(save)\n"
+        "    await asyncio.get_running_loop().run_in_executor(None, save)\n"
+        "    later = lambda: save()\n"
+        "    def inner():\n        save()\n"
+        "    twice()\n"
+    )
+    assert check_source(source) == [], [f.format() for f in check_source(source)]
+
+
+def test_generator_helper_or_shadowed_name_called_from_async_def_not_flagged():
+    # calling a generator function runs none of its body; a parameter named like a def is not that def
+    source = (
+        "import asyncio, time\n\n"
+        "def rows():\n    time.sleep(1)\n    yield 1\n\n"
+        "def save():\n    time.sleep(1)\n\n"
+        "async def handler(save):\n"
+        "    it = rows()\n"
+        "    save()\n"
+        "    return await asyncio.to_thread(list, it)\n"
+    )
+    assert check_source(source) == [], [f.format() for f in check_source(source)]
