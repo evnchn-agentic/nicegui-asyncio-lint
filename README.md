@@ -27,8 +27,15 @@ only look inside `async def`, so they miss this. This check is on only in files 
 `nicegui`; `run.io_bound(save)` is not flagged, because it passes `save` rather than calling it.
 `functools.partial(save, ...)` counts as `save`. An `on_*=` keyword on a call into another imported
 library (`mqtt.Client(on_connect=cb)`) is not treated as a NiceGUI handler, since such callbacks
-may run on that library's own thread. Not covered yet: `element.on('click', handler)`,
-`app.on_startup`/`app.on_connect` handlers, and sync functions called from an `async def`.
+may run on that library's own thread. Not covered yet: `element.on('click', handler)` and
+`app.on_startup`/`app.on_connect` handlers.
+
+The same applies without NiceGUI: a sync function that an `async def` calls directly runs on the
+loop, so `async def offer(): probe_device()` with a `time.sleep` inside `probe_device` blocks every
+other task. `NGA001` and `NGA002` fire there in any file, following same-file direct calls
+(`self.helper()` or a bare `helper()` naming exactly one function in the file). Handing the helper
+off with `asyncio.to_thread(helper)`, `run_in_executor(None, helper)` or `run.io_bound(helper)` is
+not flagged, nor is a call inside a nested `def` or `lambda`.
 
 `NGA003` and `NGA004` are two faces of the same asyncio trap class the CPython docs warn about
 explicitly: a coroutine or Task object that's created and then has no strong reference held to
