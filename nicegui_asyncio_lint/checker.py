@@ -15,7 +15,8 @@ Four rules, chosen to match the four footguns named in the loose-end item:
           discarded immediately, so asyncio may garbage-collect it mid-flight
           (the asyncio docs: "Save a reference to the result of this function,
           to avoid a task disappearing mid-execution").
-  NGA004  A call to a function/method defined *async* in this same file, used
+  NGA004  A call to a function/method defined *async* in this same file, or to a
+          known library coroutine (asyncio.sleep, NiceGUI run.io_bound, ...), used
           without `await` as a bare expression statement OR as the `return`
           value of another `async def` — the coroutine object is created and then
           discarded/returned instead of run. Async generators are exempt (calling
@@ -67,7 +68,7 @@ RULES: dict[str, str] = {
     "NGA001": "blocking time.sleep() inside an async def — use `await asyncio.sleep(...)` instead",
     "NGA002": "blocking sync I/O call inside an async def — stalls the event loop for every client",
     "NGA003": "asyncio.create_task()/ensure_future() result discarded — task may be GC'd mid-flight; keep a reference",
-    "NGA004": "call to a local async function/method without `await` — the coroutine is created and never runs",
+    "NGA004": "call to an async function without `await` — the coroutine is created and never runs",
 }
 
 # canonical dotted-name -> human hint appended to the NGA002 message.
@@ -94,6 +95,13 @@ _PAGE_DECORATORS = {"nicegui.ui.page", "ui.page"}
 _TIMERS = {"nicegui.ui.timer", "ui.timer", "nicegui.app.timer", "app.timer"}
 _HANDLER_CONTEXT = "in a sync NiceGUI page or event handler, which runs on the event loop"
 _TASK_SCHEDULERS = {"asyncio.create_task", "asyncio.ensure_future"}
+# library coroutine functions: calling one without `await` runs nothing (NGA004)
+_LIBRARY_COROUTINES = {
+    "asyncio.sleep", "asyncio.wait_for", "asyncio.wait", "asyncio.to_thread",
+    "asyncio.open_connection", "asyncio.start_server",
+    "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell",
+    "nicegui.run.io_bound", "nicegui.run.cpu_bound",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -124,10 +132,12 @@ class _Imports:
     """Resolves a syntactic dotted call target to a canonical module path,
     following single-file `import` / `from ... import` bindings."""
 
-    def __init__(self, tree: ast.AST) -> None:
+    def __init__(self, tree: ast.AST, parent: _Imports | None = None) -> None:
+        self.parent = parent  # the enclosing scope; imports are resolved innermost first
         self.module_alias: dict[str, str] = {}  # local root -> real module (import x [as y])
         self.name_alias: dict[str, str] = {}     # local name -> canonical dotted (from m import n)
-        for node in ast.walk(tree):
+        body = getattr(tree, "body", [])
+        for node in ast.walk(tree) if parent is None else _own_scope(body):
             if isinstance(node, ast.Import):
                 for a in node.names:
                     if a.asname:
@@ -142,19 +152,33 @@ class _Imports:
                 for a in node.names:
                     local = a.asname or a.name
                     self.name_alias[local] = f"{mod}.{a.name}" if mod else a.name
+        # a module-level def/class of the same name rebinds it — don't resolve it
+        for node in body if parent is None else []:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                self.name_alias.pop(node.name, None)
 
     def resolve(self, dotted: str | None) -> str | None:
         if dotted is None:
             return None
         parts = dotted.split(".")
         first, rest = parts[0], parts[1:]
-        if not rest:  # bare name
-            return self.name_alias.get(first, first)
-        if first in self.module_alias:
+        if not rest and first in self.name_alias:  # bare name
+            return self.name_alias[first]
+        if rest and first in self.module_alias:
             return ".".join([self.module_alias[first], *rest])
-        if first in self.name_alias:  # `from a import b; b.c(...)`
+        if rest and first in self.name_alias:  # `from a import b; b.c(...)`
             return ".".join([self.name_alias[first], *rest])
-        return dotted
+        return self.parent.resolve(dotted) if self.parent else dotted
+
+
+def _own_scope(nodes: list[ast.stmt]) -> Iterator[ast.AST]:
+    """Nodes of a scope's body in source order, not descending into nested functions or lambdas."""
+    todo: list[ast.AST] = list(reversed(nodes))
+    while todo:
+        node = todo.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            todo.extend(reversed(list(ast.iter_child_nodes(node))))
 
 
 class _AsyncFootgunVisitor(ast.NodeVisitor):
@@ -183,8 +207,10 @@ class _AsyncFootgunVisitor(ast.NodeVisitor):
             self.visit(dec)
         self._async_stack.append(ctx)
         self._locals_stack.append(self._params(node.args))
+        self.imports = _Imports(node, self.imports)
         for stmt in node.body:
             self.visit(stmt)
+        self.imports = self.imports.parent or self.imports
         self._async_stack.pop()
         self._locals_stack.pop()
 
@@ -245,6 +271,9 @@ class _AsyncFootgunVisitor(ast.NodeVisitor):
         if canon in _TASK_SCHEDULERS and not self._is_local(raw):
             if not isinstance(node, ast.Return):  # a returned Task is referenced by the caller
                 self._add(node, "NGA003", f"{RULES['NGA003']} ({canon}(...) {form})")
+            return
+        if canon in _LIBRARY_COROUTINES and not self._is_local(raw):
+            self._add(node, "NGA004", f"{RULES['NGA004']} (`{canon}(...)` {form}, never awaited)")
             return
         # NGA004: a bare local-async name (skip if a param shadows it), or
         # self.method where the method name is async-only (self is expected to be

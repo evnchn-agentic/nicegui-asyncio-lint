@@ -346,3 +346,62 @@ def test_on_kwargs_of_other_libraries_not_treated_as_handlers():
 def test_partial_handler_flagged():
     source = _NG + "from functools import partial\n\ndef h(x):\n    time.sleep(1)\n\nui.button(on_click=partial(h, 1))\n"
     assert [(f.line, f.code) for f in check_source(source)] == [(8, "NGA001")]
+
+
+def test_nga004_known_library_coroutines_without_await_flagged():
+    # the most common forgotten await is on a library coroutine, not a local one
+    source = (
+        "import asyncio\nfrom asyncio import sleep\nfrom nicegui import run\n\n"
+        "async def f():\n"
+        "    asyncio.sleep(1)\n"
+        "    sleep(1)\n"
+        "    run.io_bound(print)\n"
+        "    return asyncio.wait_for(f(), 1)\n"
+    )
+    findings = check_source(source)
+    assert _codes(findings) == ["NGA004"] * 4
+    assert "`asyncio.sleep(...)`" in findings[0].message
+
+
+def test_nga004_awaited_or_scheduled_library_coroutines_not_flagged():
+    source = (
+        "import asyncio\nfrom nicegui import run\n\n"
+        "async def f():\n"
+        "    await asyncio.sleep(1)\n"
+        "    await asyncio.wait_for(asyncio.sleep(1), 2)\n"
+        "    t = asyncio.create_task(run.io_bound(print))\n"
+        "    asyncio.gather(t)\n"
+        "\n"
+        "async def g(asyncio):\n"
+        "    asyncio.sleep(1)\n"
+    )
+    assert check_source(source) == []
+
+
+def test_imported_name_redefined_in_file_is_not_resolved():
+    # Codex review: `def sleep` rebinds the imported name, so `sleep(0)` is not asyncio.sleep
+    assert check_source("from asyncio import sleep\n\ndef sleep(d): ...\n\nsleep(0)\n") == []
+    assert check_source("from time import sleep\n\nasync def sleep(d): ...\n\nasync def f():\n    await sleep(0)\n") == []
+
+
+def test_module_level_def_does_not_shadow_a_function_local_import():
+    source = "def sleep(d): ...\n\nasync def f():\n    from time import sleep\n    sleep(1)\n"
+    assert _codes(check_source(source)) == ["NGA001"]
+    # ...and that import stays in its function: a sibling's `sleep` is still the module-level def
+    source = ("from asyncio import sleep\n\ndef sleep(d): ...\n\ndef helper():\n    from asyncio import sleep\n\n"
+              "async def g():\n    sleep(0)\n")
+    assert check_source(source) == []
+    # handler discovery still sees function-local imports
+    source = ("def build():\n    from nicegui import ui\n    from time import sleep\n"
+              "    ui.button(on_click=lambda: sleep(1))\n")
+    assert _codes(check_source(source)) == ["NGA001"]
+    # the later of two local imports wins
+    source = "async def f():\n    from time import sleep\n    from asyncio import sleep\n    sleep(0)\n"
+    assert _codes(check_source(source)) == ["NGA004"]
+    # an import under a module-level `if` is still a module-level binding
+    assert check_source("if True:\n    from asyncio import sleep\n\ndef sleep(d): ...\n\nsleep(0)\n") == []
+
+
+def test_method_name_does_not_shadow_a_module_import():
+    source = "from nicegui import run\n\nclass X:\n    def run(self): ...\n\nasync def f():\n    run.io_bound(print)\n"
+    assert _codes(check_source(source)) == ["NGA004"]
