@@ -132,10 +132,12 @@ class _Imports:
     """Resolves a syntactic dotted call target to a canonical module path,
     following single-file `import` / `from ... import` bindings."""
 
-    def __init__(self, tree: ast.AST) -> None:
+    def __init__(self, tree: ast.AST, parent: _Imports | None = None) -> None:
+        self.parent = parent  # the enclosing scope; imports are resolved innermost first
         self.module_alias: dict[str, str] = {}  # local root -> real module (import x [as y])
         self.name_alias: dict[str, str] = {}     # local name -> canonical dotted (from m import n)
-        for node in ast.walk(tree):
+        body = getattr(tree, "body", [])
+        for node in ast.walk(tree) if parent is None else _own_scope(body):
             if isinstance(node, ast.Import):
                 for a in node.names:
                     if a.asname:
@@ -151,7 +153,7 @@ class _Imports:
                     local = a.asname or a.name
                     self.name_alias[local] = f"{mod}.{a.name}" if mod else a.name
         # a module-level def/class of the same name rebinds it — don't resolve it
-        for node in getattr(tree, "body", []):
+        for node in body if parent is None else []:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 self.name_alias.pop(node.name, None)
 
@@ -160,13 +162,23 @@ class _Imports:
             return None
         parts = dotted.split(".")
         first, rest = parts[0], parts[1:]
-        if not rest:  # bare name
-            return self.name_alias.get(first, first)
-        if first in self.module_alias:
+        if not rest and first in self.name_alias:  # bare name
+            return self.name_alias[first]
+        if rest and first in self.module_alias:
             return ".".join([self.module_alias[first], *rest])
-        if first in self.name_alias:  # `from a import b; b.c(...)`
+        if rest and first in self.name_alias:  # `from a import b; b.c(...)`
             return ".".join([self.name_alias[first], *rest])
-        return dotted
+        return self.parent.resolve(dotted) if self.parent else dotted
+
+
+def _own_scope(nodes: list[ast.stmt]) -> Iterator[ast.AST]:
+    """Nodes of a scope's body in source order, not descending into nested functions or lambdas."""
+    todo: list[ast.AST] = list(reversed(nodes))
+    while todo:
+        node = todo.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            todo.extend(reversed(list(ast.iter_child_nodes(node))))
 
 
 class _AsyncFootgunVisitor(ast.NodeVisitor):
@@ -195,8 +207,10 @@ class _AsyncFootgunVisitor(ast.NodeVisitor):
             self.visit(dec)
         self._async_stack.append(ctx)
         self._locals_stack.append(self._params(node.args))
+        self.imports = _Imports(node, self.imports)
         for stmt in node.body:
             self.visit(stmt)
+        self.imports = self.imports.parent or self.imports
         self._async_stack.pop()
         self._locals_stack.pop()
 

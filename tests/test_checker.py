@@ -384,6 +384,24 @@ def test_imported_name_redefined_in_file_is_not_resolved():
     assert check_source("from time import sleep\n\nasync def sleep(d): ...\n\nasync def f():\n    await sleep(0)\n") == []
 
 
+def test_module_level_def_does_not_shadow_a_function_local_import():
+    source = "def sleep(d): ...\n\nasync def f():\n    from time import sleep\n    sleep(1)\n"
+    assert _codes(check_source(source)) == ["NGA001"]
+    # ...and that import stays in its function: a sibling's `sleep` is still the module-level def
+    source = ("from asyncio import sleep\n\ndef sleep(d): ...\n\ndef helper():\n    from asyncio import sleep\n\n"
+              "async def g():\n    sleep(0)\n")
+    assert check_source(source) == []
+    # handler discovery still sees function-local imports
+    source = ("def build():\n    from nicegui import ui\n    from time import sleep\n"
+              "    ui.button(on_click=lambda: sleep(1))\n")
+    assert _codes(check_source(source)) == ["NGA001"]
+    # the later of two local imports wins
+    source = "async def f():\n    from time import sleep\n    from asyncio import sleep\n    sleep(0)\n"
+    assert _codes(check_source(source)) == ["NGA004"]
+    # an import under a module-level `if` is still a module-level binding
+    assert check_source("if True:\n    from asyncio import sleep\n\ndef sleep(d): ...\n\nsleep(0)\n") == []
+
+
 def test_method_name_does_not_shadow_a_module_import():
     source = "from nicegui import run\n\nclass X:\n    def run(self): ...\n\nasync def f():\n    run.io_bound(print)\n"
     assert _codes(check_source(source)) == ["NGA004"]
